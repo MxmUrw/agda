@@ -114,7 +114,7 @@ import qualified Data.Text as T
 
 import System.FilePath ( (</>) )
 
-import Agda.Compiler.Backend (Backend(..), Backend'(..), Definition, Recompile(..))
+import Agda.Compiler.Backend (Backend(..), Backend'(..), Definition, Recompile(..), compilerMain)
 import Agda.Compiler.Common (curIF, IsMain(IsMain, NotMain))
 
 import Agda.Interaction.Options
@@ -164,7 +164,7 @@ externalInteractionOutputCallback = \case
                                  putStr "Response: ClearHighlighting"
                                  hFlush stdout
   Resp_Status s            -> liftIO $ do
-                                 putStr $ "ILLEGAL Response: status: " ++ show s
+                                 putStr $ "ILLEGAL Response: status " -- ++ show s
                                  hFlush stdout
   Resp_JumpToError {}       -> __IMPOSSIBLE__
   Resp_InteractionPoints {} -> __IMPOSSIBLE__
@@ -200,7 +200,7 @@ generatePrettyLatexIO p file_Abs dir_Abs = do
 
 generatePrettyLatex :: Prettifier -> FilePath -> FilePath -> CommandM ()
 generatePrettyLatex p file_Abs dir_Abs =
-    let res = cmd_load' file_Abs [] True (Imp.TypeCheck AIB.RegularInteraction )
+    let res = cmd_load' file_Abs [] True (Imp.TypeCheck)
               $ \checkResult -> do 
                               mw <- lift $ applyFlagsToTCWarnings $ crWarnings checkResult
                               case mw of

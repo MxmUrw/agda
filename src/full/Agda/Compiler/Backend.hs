@@ -19,6 +19,7 @@ module Agda.Compiler.Backend
     -- Tools
   , lookupBackend
   , activeBackend
+  , compilerMain
   ) where
 
 import Control.DeepSeq
