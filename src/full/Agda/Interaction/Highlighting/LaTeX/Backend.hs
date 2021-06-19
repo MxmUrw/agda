@@ -1,6 +1,8 @@
 
 module Agda.Interaction.Highlighting.LaTeX.Backend
   ( latexBackend
+  , prettyLatexBackend
+  , prettyLatexBackend'
   ) where
 
 import Agda.Interaction.Highlighting.LaTeX.Base
@@ -12,7 +14,11 @@ import Agda.Interaction.Highlighting.LaTeX.Base
   , prepareCommonAssets
   )
 
+import Debug.Trace
+
 import Control.DeepSeq
+import Debug.Trace
+
 import Control.Monad.Trans (MonadIO)
 
 import qualified Data.Map as Map
@@ -49,6 +55,8 @@ import Agda.TypeChecking.Monad
 
 import Agda.Utils.FileName (filePath, mkAbsolute)
 
+import Agda.Interaction.Highlighting.LaTeX.Prettify
+
 ------------------------------------------------------------------------
 -- * Main.
 
@@ -58,8 +66,8 @@ data LaTeXFlags = LaTeXFlags
   , latexFlagSourceFile    :: Maybe FilePath
   , latexFlagGenerateLaTeX :: Bool
     -- ^ Are we going to try to generate LaTeX at all?
+  , latexFlagPrettifier    :: Maybe Prettifier
   } deriving (Eq, Generic)
-
 instance NFData LaTeXFlags
 
 -- | The default output directory for LaTeX.
@@ -72,6 +80,7 @@ defaultLaTeXFlags = LaTeXFlags
   { latexFlagOutDir        = defaultLaTeXDir
   , latexFlagSourceFile    = Nothing
   , latexFlagGenerateLaTeX = False
+  , latexFlagPrettifier = Nothing
   }
 
 latexFlagsDescriptions :: [OptDescr (Flag LaTeXFlags)]
@@ -113,6 +122,26 @@ latexBackend' = Backend'
   , mayEraseType          = const $ return False
   }
 
+prettyLatexBackend :: Prettifier -> FilePath -> Backend
+prettyLatexBackend p latexDir = Backend (prettyLatexBackend' p latexDir)
+
+prettyLatexBackend' :: Prettifier -> FilePath -> Backend' LaTeXFlags LaTeXCompileEnv LaTeXModuleEnv LaTeXModule LaTeXDef
+prettyLatexBackend' p latexDir = Backend'
+  { backendName           = "LaTeX"
+  , backendVersion        = Nothing
+  , options               = defaultLaTeXFlags {latexFlagPrettifier = Just p, latexFlagOutDir = latexDir}
+  , commandLineFlags      = latexFlagsDescriptions
+  , isEnabled             = latexFlagGenerateLaTeX
+  , preCompile            = preCompileLaTeX
+  , preModule             = preModuleLaTeX
+  , compileDef            = compileDefLaTeX
+  , postModule            = postModuleLaTeX
+  , postCompile           = postCompileLaTeX
+  , scopeCheckingSuffices = True
+  , mayEraseType          = const $ return False
+  }
+
+
 runLogLaTeXWithMonadDebug :: MonadDebug m => LogLaTeXT m a -> m a
 runLogLaTeXWithMonadDebug = runLogLaTeXTWith $ (reportS "compile.latex" 1) . T.unpack . logMsgToText
 
@@ -135,6 +164,7 @@ resolveLaTeXOptions flags moduleName = do
     { latexOptOutDir         = outDir
     , latexOptSourceFileName = mSrcFileName
     , latexOptCountClusters  = countClusters
+    , latexOptPrettifier     = latexFlagPrettifier flags
     }
 
 preCompileLaTeX

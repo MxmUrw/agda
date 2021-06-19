@@ -15,6 +15,9 @@ module Agda.Interaction.Highlighting.LaTeX.Base
   , LaTeXOptions(..)
   ) where
 
+
+import Debug.Trace (trace)
+
 import Prelude hiding (log)
 import Data.Char
 import Data.Maybe
@@ -40,6 +43,7 @@ import Data.HashSet (HashSet)
 import qualified Data.HashSet as Set
 import qualified Data.IntMap  as IntMap
 import qualified Data.List    as List
+import qualified Data.Set     as RealSet
 
 import Paths_Agda
 
@@ -55,10 +59,11 @@ import Agda.Interaction.Highlighting.Precise hiding (toList)
 import Agda.TypeChecking.Monad (Interface(..))
 
 import Agda.Utils.FileName (AbsolutePath)
-import Agda.Utils.List     (last1)
 import qualified Agda.Utils.List1 as List1
 
 import Agda.Utils.Impossible
+
+import Agda.Interaction.Highlighting.LaTeX.Prettify
 
 ------------------------------------------------------------------------
 -- * Logging
@@ -150,6 +155,7 @@ data Env = Env
     -- ^ How to estimate the column width of text (i.e. Count extended grapheme clusters vs. code points).
   , debugs :: [Debug]
     -- ^ Says what debug information should printed.
+  , tokenPrettifier :: Maybe Prettifier
   }
 
 data State = State
@@ -170,6 +176,7 @@ data State = State
                             -- ^ Indentation columns that have
                             -- actually
                             --   been used.
+  , currentlyIsMathMode :: IsMathMode
   }
 
 type Tokens = [Token]
@@ -179,6 +186,15 @@ data Token = Token
   , info     :: Aspects
   }
   deriving Show
+
+
+aspectToAspects :: Maybe Aspect -> Aspects
+aspectToAspects a = Aspects a RealSet.empty "" Nothing TokenBased
+
+instance TokenLike Token where
+  getTokenText = text
+  setTokenText a t = a {text = t}
+  makePlainToken a t = Token t (aspectToAspects a)
 
 withTokenText :: (Text -> Text) -> Token -> Token
 withTokenText f tok@Token{text = t} = tok{text = f t}
@@ -201,12 +217,14 @@ emptyState = State
   , columnsPrev   = []
   , nextId        = 0
   , usedColumns   = Set.empty
+  , currentlyIsMathMode = NotMathMode
   }
 
 emptyEnv
   :: TextWidthEstimator  -- ^ Count extended grapheme clusters?
+  -> Maybe Prettifier
   -> Env
-emptyEnv twe = Env twe []
+emptyEnv twe p = Env twe [] p
 
 
 ------------------------------------------------------------------------
@@ -262,10 +280,10 @@ resetColumn = modify $ \s ->
     }
   where
   -- Remove shadowed columns from old.
-  mergeCols []         old = old
-  mergeCols new@(n:ns) old = new ++ filter ((< leastNew) . columnColumn) old
+  mergeCols []  old = old
+  mergeCols new old = new ++ filter ((< leastNew) . columnColumn) old
     where
-    leastNew = columnColumn (last1 n ns)
+    leastNew = columnColumn (last new)
 
 moveColumn :: Int -> LaTeX ()
 moveColumn i = modify $ \s -> s { column = i + column s }
@@ -353,10 +371,30 @@ log Code text = do
   logHelper Code text ["columns=", tshow cols, "col=", tshow col]
 log debug text = logHelper debug text []
 
-output :: Output -> LaTeX ()
-output item = do
+data IsMathMode = IsMathMode | NotMathMode
+  deriving (Eq)
+
+-- wrapSMM new old ...
+wrapSMM :: IsMathMode -> IsMathMode -> [Output] -> [Output]
+wrapSMM IsMathMode  NotMathMode o = [Text "\\("] <> o
+wrapSMM NotMathMode IsMathMode  o = [Text "\\)"] <> o
+wrapSMM _           _           o = o
+-- wrapSMM a b o = case a == b of
+--   True -> o 
+--   False -> [Text "$"] <> o
+-- wrapSMM :: IsMathMode -> IsMathMode -> [Output] -> [Output]
+-- wrapSMM a b o = case a == b of
+--   True -> o 
+--   False -> [Text "$"] <> o
+
+output :: IsMathMode -> Output -> LaTeX ()
+output shouldMM item = do
   log Output (T.pack $ show item)
-  tell [item]
+  st <- get
+  let currentMM = currentlyIsMathMode st
+  tell (wrapSMM shouldMM currentMM [item])
+  let st2 = st {currentlyIsMathMode = shouldMM}
+  put st2
 
 ------------------------------------------------------------------------
 -- * LaTeX and polytable strings.
@@ -383,10 +421,18 @@ columnName c = T.pack $ case columnKind c of
   Nothing -> show (columnColumn c)
   Just i  -> show i ++ "I"
 
--- | Opens a column with the given name.
 
+-- | Opens a column with the given name. And with math mode.
+-- ptOpenMath' :: Text -> Text
+-- ptOpenMath' name = "\\>[" <+> name <+> "]" <+> "$"
+
+-- ptOpenMath :: AlignmentColumn -> Text
+-- ptOpenMath c = ptOpenMath' (columnName c)
+
+-- | Opens a column with the given name.
 ptOpen' :: Text -> Text
 ptOpen' name = "\\>[" <+> name <+> "]"
+-- ptOpen' name = "\\>[" <+> name <+> "]" <+> "$"
 
 -- | Opens the given column.
 
@@ -415,6 +461,15 @@ ptOpenIndent c delta =
 
 ptClose :: Text
 ptClose = "\\<"
+-- ptClose = "$" <+> "\\<"
+
+-- ptCloseMath :: Text
+-- ptCloseMath = "$" <+> "\\<"
+
+-- ptCloseMath' :: AlignmentColumn -> Text
+-- ptCloseMath' c =
+--   ptCloseMath <+> "[" <+> columnName c <+> "]"
+
 
 ptClose' :: AlignmentColumn -> Text
 ptClose' c =
@@ -439,43 +494,50 @@ cmdArg x = "{" <+> x <+> "}"
 ------------------------------------------------------------------------
 -- * Output generation from a stream of labelled tokens.
 
-processLayers :: [(LayerRole, Tokens)] -> LaTeX ()
+-- processLayers :: [(LayerRole, Tokens)] -> LaTeX ()
 -- ASR (2021-02-07). The eta-expansion on @lt@ is required by GHC >=
 -- 9.0.1 (see Issue #4955).
-processLayers lt = (mapM_ $ \(layerRole,toks) -> do
+processLayers :: Maybe Prettifier -> [(LayerRole, Tokens)] -> LaTeX ()
+processLayers p lt = (mapM_ $ \(layerRole,toks) -> do
   case layerRole of
-    L.Markup  -> processMarkup  toks
-    L.Comment -> processComment toks
-    L.Code    -> processCode    toks) lt
+    L.Markup  -> processMarkup  p toks
+    L.Comment -> processComment p toks
+    L.Code    -> processCode    p toks) lt
 
-processMarkup, processComment, processCode :: Tokens -> LaTeX ()
+processMarkup, processComment, processCode :: Maybe Prettifier -> Tokens -> LaTeX ()
 
 -- | Deals with markup, which is output verbatim.
 -- ASR (2021-02-07). The eta-expansion on @t@ is required by GHC >=
 -- 9.0.1 (see Issue #4955).
-processMarkup t = (mapM_ $ \t' -> do
+processMarkup _ t = (mapM_ $ \t' -> do
   moveColumnForToken t'
-  output (Text (text t'))) t
+  output NotMathMode (Text (text t'))) t
 
 -- | Deals with literate text, which is output verbatim
 -- ASR (2021-02-07). The eta-expansion with @t@ is required by GHC >=
 -- 9.0.1 (see Issue #4955).
-processComment t = (mapM_ $ \t' -> do
+processComment _ t = (mapM_ $ \t' -> do
   unless ("%" == T.take 1 (T.stripStart (text t'))) $ do
     moveColumnForToken t'
-  output (Text (text t'))) t
+  output NotMathMode (Text (text t'))) t
+
 
 -- | Deals with code blocks. Every token, except spaces, is pretty
 -- printed as a LaTeX command.
-processCode toks' = do
-  output $ Text nl
+processCode prettifier0 toks' = do
+  -- trace (show toks') $ output $ Text nl
+  output NotMathMode $ Text nl
   enterCode
   mapM_ go toks'
   ptOpenWhenColumnZero =<< gets column
-  output $ Text $ ptClose <+> nl
+  output NotMathMode $ Text $ ptClose <+> nl
   leaveCode
 
   where
+    prettyChars = case prettifier0 of
+                       Just p -> processChars p
+                       Nothing -> return
+
     go tok' = do
       -- Get the column information before grabbing the token, since
       -- grabbing (possibly) moves the column.
@@ -491,11 +553,11 @@ processCode toks' = do
             spaces $ T.group $ replaceSpaces tok
         else do
           ptOpenWhenColumnZero col
-          output $ Text $
+          output IsMathMode $ Text $
             -- we return the escaped token wrapped in commands corresponding
             -- to its aspect (if any) and other aspects (e.g. error, unsolved meta)
             foldr (\c t -> cmdPrefix <+> T.pack c <+> cmdArg t)
-                  (escape tok)
+                  (escape prettyChars tok)
                   $ map fromOtherAspect (toList $ otherAspects $ info tok') ++
                     concatMap fromAspect (toList $ aspect $ info tok')
 
@@ -506,7 +568,8 @@ processCode toks' = do
           registerColumnZero
           -- ASR (2021-02-07). The eta-expansion @\o -> output o@ is
           -- required by GHC >= 9.0.1 (see Issue #4955).
-          (\o -> output o). Text . ptOpen =<< columnZero
+          (\o -> output NotMathMode o) . Text . ptOpen =<< columnZero
+          -- output . Text . ptOpen =<< columnZero
 
     -- Translation from OtherAspect to command strings. So far it happens
     -- to correspond to @show@ but it does not have to (cf. fromAspect)
@@ -515,6 +578,9 @@ processCode toks' = do
 
     fromAspect :: Aspect -> [String]
     fromAspect a = let s = [show a] in case a of
+      -- Metabuilder custom aspect:
+      (MetabuilderAspect t)         -> [T.unpack t]
+      -- Original aspects:
       Comment           -> s
       Keyword           -> s
       Hole              -> s
@@ -554,9 +620,9 @@ processCode toks' = do
         sk = show kind
 
 -- | Escapes special characters.
-escape :: Text -> Text
-escape (T.uncons -> Nothing)     = T.empty
-escape (T.uncons -> Just (c, s)) = T.pack (replace c) <+> escape s
+escape :: (Char -> String) -> Text -> Text
+escape extra (T.uncons -> Nothing)     = T.empty
+escape extra (T.uncons -> Just (c, s)) = T.pack (replace c >>= extra) <+> escape extra s
   where
   replace :: Char -> String
   replace char = case char of
@@ -591,8 +657,8 @@ spaces (s@(T.uncons -> Just ('\n', _)) : ss) = do
   when (col == 0) $
     -- ASR (2021-02-07). The eta-expansion @\o -> output o@ is
     -- required by GHC >= 9.0.1 (see Issue #4955).
-    (\o -> output o) . Text . ptOpen =<< columnZero
-  output $ Text $ ptClose <+> ptNL <+>
+    (\o -> output NotMathMode o) . Text . ptOpen =<< columnZero
+  output NotMathMode $ Text $ ptClose <+> ptNL <+>
                   T.replicate (T.length s - 1) ptEmptyLine
   resetColumn
   spaces ss
@@ -626,15 +692,15 @@ spaces [ s ] = do
         -- Align. (This happens automatically if the column is an
         -- alignment column, but c is an indentation column.)
         useColumn c
-        output $ Text $ ptOpenBeginningOfLine
-        output $ Text $ ptClose' c
+        output NotMathMode $ Text $ ptOpenBeginningOfLine
+        output NotMathMode $ Text $ ptClose' c
       c : _ | columnColumn c <  len -> do
         -- Indent.
         useColumn c
-        output $ Text $ ptOpenIndent c (codeBlock - columnCodeBlock c)
+        output NotMathMode $ Text $ ptOpenIndent c (codeBlock - columnCodeBlock c)
       _ -> return ()
 
-  output $ MaybeColumn column
+  output NotMathMode $ MaybeColumn column
 
 -- | Split multi-lines string literals into multiple string literals
 -- Isolating leading spaces for the alignment machinery to work
@@ -668,6 +734,7 @@ data LaTeXOptions = LaTeXOptions
   , latexOptCountClusters  :: Bool
     -- ^ Count extended grapheme clusters rather than code points when
     -- generating LaTeX.
+  , latexOptPrettifier :: Maybe Prettifier
   }
 
 getTextWidthEstimator :: Bool -> TextWidthEstimator
@@ -703,9 +770,10 @@ generateLaTeXIO :: (MonadLogLaTeX m, MonadIO m) => LaTeXOptions -> Interface -> 
 generateLaTeXIO opts i = do
   let textWidthEstimator = getTextWidthEstimator (latexOptCountClusters opts)
   let baseDir = latexOptOutDir opts
+  let prettifier = latexOptPrettifier opts
   let outPath = baseDir </> (latexOutRelativeFilePath $ toTopLevelModuleName $ iModuleName i)
   latex <- E.encodeUtf8 <$> toLaTeX
-              (emptyEnv textWidthEstimator)
+              (emptyEnv textWidthEstimator prettifier)
               (latexOptSourceFileName opts)
               (iSource i)
               (iHighlighting i)
@@ -792,13 +860,13 @@ toLaTeX env path source hi =
   where
   infoMap = toMap hi
 
-  -- This function preserves laziness of the list
+  -- | This function preserves laziness of the list
   withLast :: (a -> a) -> [a] -> [a]
   withLast _ [] = []
   withLast f [a] = [f a]
   withLast f (a:as) = a:withLast f as
 
-  -- This function preserves laziness of the list
+  -- | This function preserves laziness of the list
   withFirst :: (a -> a) -> [a] -> [a]
   withFirst _ [] = []
   withFirst f (a:as) = f a:as
@@ -807,18 +875,29 @@ toLaTeX env path source hi =
   whenMoreThanOne f xs@(_:_:_) = f xs
   whenMoreThanOne _ xs         = xs
 
+prettifyLayer :: Prettifier -> (LayerRole, Tokens) -> (LayerRole, Tokens)
+prettifyLayer p (L.Code, t) = (L.Code , prettify p t)
+prettifyLayer p (r, t) = (r , t)
 
 processTokens
   :: MonadLogLaTeX m
   => Env
   -> [(LayerRole, Tokens)]
   -> m L.Text
-processTokens env ts = do
-  ((), s, os) <- runLaTeX (processLayers ts) env emptyState
-  return $ L.fromChunks $ map (render s) os
+processTokens env ts0 = do
+  let ts = case (tokenPrettifier env) of
+                Just p -> prettifyLayer p <$> ts0
+                Nothing -> ts0
+
+  ((), s, os) <- runLaTeX (processLayers (tokenPrettifier env) ts) env emptyState
+  return $ mergeSpaces $ L.fromChunks $ map (render s) os
   where
     render _ (Text s)        = s
     render s (MaybeColumn c)
       | Just i <- columnKind c,
         not (Set.member i (usedColumns s)) = agdaSpace
       | otherwise                          = nl <+> ptOpen c
+
+    mergeSpaces :: L.Text -> L.Text
+    mergeSpaces = L.replace ("\\)" <> L.fromStrict agdaSpace <> "\\(") (L.fromStrict agdaSpace)
+    -- mergeSpaces = L.replace ("$" <> L.fromStrict agdaSpace <> "$") (L.fromStrict agdaSpace)
