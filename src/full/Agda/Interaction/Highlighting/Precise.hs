@@ -46,6 +46,7 @@ import qualified Data.Map.Strict as Map
 
 import Data.Set (Set)
 import qualified Data.Set as Set
+import qualified Data.Text
 
 import GHC.Generics (Generic)
 
@@ -87,6 +88,7 @@ data Aspect
   | Markup
     -- ^ Delimiters used to separate the Agda code blocks from the
     -- other contents in literate Agda
+  | MetabuilderAspect Data.Text.Text
     deriving (Eq, Show, Generic)
 
 -- | @NameKind@s are figured out during scope checking.

@@ -55,6 +55,7 @@ instance EmbPrj HP.Aspect where
   icod_ HP.Background    = icodeN 7 ()
   icod_ HP.Markup        = icodeN 8 ()
   icod_ HP.Hole          = icodeN 9 ()
+  icod_ (HP.MetabuilderAspect _) = icodeN 1 ()
 
   value = vcase valu where
     valu [0]        = valuN HP.Comment

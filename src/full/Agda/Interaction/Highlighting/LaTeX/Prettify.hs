@@ -47,6 +47,8 @@ import Agda.TypeChecking.Monad
 
 import Agda.Utils.FileName (filePath, mkAbsolute)
 
+import Control.DeepSeq
+
 class TokenLike a where
     getTokenText :: a -> Text
     setTokenText :: a -> Text -> a
@@ -60,5 +62,8 @@ data Prettifier = Prettifier
 
 instance Eq Prettifier where
   a == b = True
+
+instance NFData Prettifier where
+  rnf _ = ()
 
 

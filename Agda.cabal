@@ -361,6 +361,7 @@ library
                     Agda.Interaction.Highlighting.Range
                     Agda.Interaction.Highlighting.Vim
                     Agda.Interaction.Highlighting.LaTeX
+                    Agda.Interaction.Highlighting.LaTeX.Prettify
                     Agda.Interaction.Imports
                     Agda.Interaction.InteractionTop
                     Agda.Interaction.Response
